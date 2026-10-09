@@ -1,0 +1,9 @@
+**/.git
+**/.env
+web/vendor
+web/node_modules
+web/storage/logs/*
+web/storage/app/media
+worker/data
+worker/.venv
+**/__pycache__

@@ -1,0 +1,92 @@
+# Dashboard stack (runs on any small VPS):   docker compose up -d
+# GPU stack (on the GPU machine):             docker compose --profile gpu up -d worker ollama
+# The worker only makes outbound HTTPS calls to the dashboard, so the two can live on different machines.
+
+x-web: &web
+  build:
+    context: .
+    dockerfile: docker/web/Dockerfile
+  image: shorts-pipeline-web
+  env_file: web/.env
+  environment:
+    DB_HOST: mysql
+  volumes:
+    - web-storage:/var/www/html/storage
+  depends_on:
+    mysql:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-shorts}
+      MYSQL_USER: ${DB_USERNAME:-shorts}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in the root .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in the root .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    <<: *web
+    environment:
+      DB_HOST: mysql
+      RUN_MIGRATIONS: "1"
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+  queue:
+    <<: *web
+    user: www-data
+    command: ["php", "artisan", "queue:work", "--timeout=1800", "--sleep=3", "--max-time=3600"]
+
+  scheduler:
+    <<: *web
+    user: www-data
+    command: ["php", "artisan", "schedule:work"]
+
+  ollama:
+    profiles: ["gpu"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+    restart: unless-stopped
+
+  worker:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: docker/worker/Dockerfile
+    env_file: worker/.env
+    environment:
+      LLM_BASE_URL: http://ollama:11434/v1
+      WORK_DIR: /data/work
+      # ComfyUI runs on the host (see README); reach it from the container:
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - worker-data:/data
+      - whisper-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  web-storage:
+  ollama:
+  worker-data:
+  whisper-cache:
